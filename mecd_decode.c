@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <opus.h>
+#include <zstd.h>
 
 char * alloc_concat(char const *first, char const *second)
 {
@@ -255,6 +256,9 @@ int main(int argc, char **argv)
 	int error;
 	OpusDecoder *decoder = opus_decoder_create(48000, 2, &error);
 	printf("opus_decoder_create: %p, error = %d\n", decoder, error);
+	void *encoded_block = NULL;
+	size_t encoded_max_size = 0;
+	void *decode_buffer = NULL;
 	
 	for (;;)
 	{
@@ -395,14 +399,25 @@ int main(int argc, char **argv)
 								fwrite(sample, 2, sizeof(int16_t), audio_file);
 							}
 						} else {
-							void *block = calloc(1, size);
+							if (encoded_max_size < size) {
+								encoded_block = realloc(encoded_block, size);
+								encoded_max_size = size;
+							}
 							fseek(f, prev, SEEK_SET);
-							size_t bytes_read = fread(block, 1, size, f);
-							decode_in_place(&block_state, block, bytes_read);
+							size_t bytes_read = fread(encoded_block, 1, size, f);
+							decode_in_place(&block_state, encoded_block, bytes_read);
 							if (cur_block < data_blocks) {
-								fwrite(block, 1, bytes_read, data_file);
+								if (!decode_buffer) {
+									decode_buffer = calloc(1, 32 * 2048);
+								}
+								size_t decoded_size = ZSTD_decompress(decode_buffer, 32 * 2048, encoded_block, bytes_read);
+								if (ZSTD_isError(decoded_size)) {
+									fprintf(stderr, "Failed to decompress block: %zX\n", decoded_size);
+								} else {
+									fwrite(decode_buffer, 1, decoded_size, data_file);
+								}
 							} else {
-								uint8_t *bytes = block;
+								uint8_t *bytes = encoded_block;
 								uint32_t num_packets = bytes[0];
 								printf("num opus packets: %u\n", num_packets);
 								uint8_t *cur = bytes + 1;

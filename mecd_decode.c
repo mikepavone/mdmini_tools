@@ -161,8 +161,6 @@ void decode_in_place(decoder_state *state, void *buf, uint32_t size)
 	}
 }
 
-int16_t decode_buffer[48 * 120 * 2];
-
 void usage(void)
 {
 	puts("Usage: mecd_decode [OPTION...] INPUTFILE");
@@ -259,6 +257,7 @@ int main(int argc, char **argv)
 	void *encoded_block = NULL;
 	size_t encoded_max_size = 0;
 	void *decode_buffer = NULL;
+	int16_t prev_sample[2] = {0, 0};
 	
 	for (;;)
 	{
@@ -394,7 +393,7 @@ int main(int argc, char **argv)
 						if (!size && cur_block >= data_blocks) {
 							//TODO: use silence from audz instead
 							int16_t sample[2] = {0,0};
-							for (int j = 0; j < 48000; j++)
+							for (int j = 0; j < 44100; j++)
 							{
 								fwrite(sample, 2, sizeof(int16_t), audio_file);
 							}
@@ -406,10 +405,10 @@ int main(int argc, char **argv)
 							fseek(f, prev, SEEK_SET);
 							size_t bytes_read = fread(encoded_block, 1, size, f);
 							decode_in_place(&block_state, encoded_block, bytes_read);
+							if (!decode_buffer) {
+								decode_buffer = calloc(1, 32 * 2048);
+							}
 							if (cur_block < data_blocks) {
-								if (!decode_buffer) {
-									decode_buffer = calloc(1, 32 * 2048);
-								}
 								size_t decoded_size = ZSTD_decompress(decode_buffer, 32 * 2048, encoded_block, bytes_read);
 								if (ZSTD_isError(decoded_size)) {
 									fprintf(stderr, "Failed to decompress block: %zX\n", decoded_size);
@@ -441,8 +440,28 @@ int main(int argc, char **argv)
 									}
 									int decoded = opus_decode(decoder, cur, size, decode_buffer, 48 * 120, 0);
 									if (decoded > 0) {
-										printf("encoded size: %u, decoded size: %d, offset: %ld\n", size, decoded, cur - bytes);
-										fwrite(decode_buffer, 2 * sizeof(int16_t), decoded, audio_file);
+										
+										float ratio = 48000.0f / 44100.0f;
+										int output_samples = decoded / ratio + 0.5f;
+										float curpos = 0.0;
+										int16_t *input = decode_buffer;
+										printf("encoded size: %u, decoded size: %d, offset: %ld, resampled size: %d\n", size, decoded, cur - bytes, output_samples);
+										for (int i = 0; i < output_samples; i++)
+										{
+											int before = curpos;
+											int after = before + 1;
+											if (after >= decoded) {
+												after = decoded - 1;
+											}
+											int16_t sample[2];
+											float frac = curpos - before;
+											float inv = 1.0f - frac;
+											sample[0] = (((float)input[before * 2]) * inv + ((float)input[after * 2]) * frac) * 0.5f + 0.5f;
+											sample[1] = (((float)input[before * 2 + 1]) * inv + ((float)input[after * 2 + 1]) * frac) * 0.5f + 0.5f;
+											fwrite(sample, 2, sizeof(int16_t), audio_file);
+											curpos += ratio;
+										}
+										//fwrite(decode_buffer, 2 * sizeof(int16_t), decoded, audio_file);
 									} else {
 										printf("opus_decode error %d, encoded_size: %u, first_byte %X, offset: %ld\n", decoded, size, *cur, cur - bytes);
 									}

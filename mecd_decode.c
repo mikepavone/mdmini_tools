@@ -5,6 +5,97 @@
 #include <string.h>
 #include <opus.h>
 
+char * alloc_concat(char const *first, char const *second)
+{
+	size_t flen = first ? strlen(first) : 0;
+	size_t slen = second ? strlen(second) : 0;
+	char * ret = malloc(flen + slen + 1);
+	if (first) {
+		memcpy(ret, first, flen);
+	}
+	if (second) {
+		memcpy(ret+flen, second, slen+1);
+	} else {
+		ret[flen+slen] = 0;
+	}
+	return ret;
+}
+
+char is_path_sep(char c)
+{
+#ifdef _WIN32
+	if (c == '\\') {
+		return 1;
+	}
+#endif
+	return c == '/';
+}
+
+char * basename_no_extension(const char *path)
+{
+	const char *lastdot = NULL;
+	const char *lastslash = NULL;
+	const char *cur;
+	for (cur = path; *cur; cur++)
+	{
+		if (*cur == '.') {
+			lastdot = cur;
+		} else if (is_path_sep(*cur)) {
+			lastslash = cur + 1;
+		}
+	}
+	if (!lastdot || (lastslash && lastdot < lastslash)) {
+		lastdot = cur;
+	}
+	if (!lastslash) {
+		lastslash = path;
+	}
+	char *barename = malloc(lastdot-lastslash+1);
+	memcpy(barename, lastslash, lastdot-lastslash);
+	barename[lastdot-lastslash] = 0;
+
+	return barename;
+}
+
+char * port_basename(const char *path)
+{
+	const char *lastslash = NULL;
+	const char *cur;
+	for (cur = path; *cur; cur++)
+	{
+		if (is_path_sep(*cur)) {
+			lastslash = cur + 1;
+		}
+	}
+	if (!lastslash) {
+		lastslash = path;
+	}
+	char *base = malloc(cur-lastslash+1);
+	memcpy(base, lastslash, cur-lastslash+1);
+
+	return base;
+}
+
+char * path_dirname(const char *path)
+{
+	const char *lastslash = NULL;
+	const char *cur;
+	for (cur = path; *cur; cur++)
+	{
+		if (is_path_sep(*cur)) {
+			lastslash = cur;
+		}
+	}
+	if (!lastslash) {
+		return NULL;
+	}
+	char *dir = malloc(lastslash-path+1);
+	memcpy(dir, path, lastslash-path);
+	dir[lastslash-path] = 0;
+
+	return dir;
+}
+
 typedef struct {
 	char     type[4];
 	uint32_t size;
@@ -71,9 +162,93 @@ void decode_in_place(decoder_state *state, void *buf, uint32_t size)
 
 int16_t decode_buffer[48 * 120 * 2];
 
+void usage(void)
+{
+	puts("Usage: mecd_decode [OPTION...] INPUTFILE");
+	puts("  -o CUENAME Set output CUE file name to CUENAME");
+	puts("  -d DIRNAME Set output directory to DIRNAME");
+	puts("  -i ISONAME Set output data track file to ISONAME");
+	puts("  -a AUDIONAME Set output file for audio tracks to AUDIONAME");
+}
+
 int main(int argc, char **argv)
 {
-	FILE *f = fopen(argv[1], "rb");
+	char *input = NULL;
+	char *cuename = NULL;
+	char *isoname = NULL;
+	char *audioname = NULL;
+	char *outdir = NULL;
+	char **param = NULL;
+	for (int i = 1; i < argc; i++)
+	{
+		if (argv[i][0] == '-') {
+		switch (argv[i][1])
+		{
+		case 'o':
+			param = &cuename;
+			break;
+		case 'd':
+			param = &outdir;
+			break;
+		case 'i':
+			param = &isoname;
+			break;
+		case 'a':
+			param = &audioname;
+			break;
+		case 'h':
+			usage();
+			return 0;
+		default:
+			fprintf(stderr, "Unrecognized switch %s\n", argv[i]);
+			usage();
+			return 1;
+		}
+		} else if (param) {
+			*param = argv[i];
+			param = NULL;
+		} else if (!input) {
+			input = argv[i];
+		} else {
+			fprintf(stderr, "Extra param %s\n", argv[i]);
+			return 1;
+		}
+	}
+	if (!input) {
+		fputs("Missing input file name\n", stderr);
+		usage();
+		return 1;
+	}
+	if (!outdir) {
+		if (cuename) {
+			outdir = path_dirname(cuename);
+		} else {
+			outdir = path_dirname(input);
+		}
+	}
+	if (!cuename) {
+		char *base_file = basename_no_extension(input);
+		char *without_ext = alloc_concat(outdir, base_file);
+		free(base_file);
+		cuename = alloc_concat(without_ext, ".cue");
+		free(without_ext);
+	}
+	if (!isoname) {
+		char *base_file = basename_no_extension(cuename);
+		char *without_ext = alloc_concat(outdir, base_file);
+		free(base_file);
+		isoname = alloc_concat(without_ext, ".iso");
+		free(without_ext);
+	}
+	if (!audioname) {
+		char *base_file = basename_no_extension(cuename);
+		char *without_ext = alloc_concat(outdir, base_file);
+		free(base_file);
+		audioname = alloc_concat(without_ext, ".cdr");
+		free(without_ext);
+	}
+
+	FILE *f = fopen(input, "rb");
 	fseek(f, 8, SEEK_CUR);
 	decoder_state state = {0,0};
 	uint8_t has_info = 0;
@@ -113,8 +288,10 @@ int main(int argc, char **argv)
 			init_decoder(&state, h.size, els[num_els - 1]);
 			decoder_state my_state = state;
 			int track_num = 1;
-			FILE *cuef = fopen("image.cue", "w");
-			fprintf(cuef, "FILE \"data.bin\" BINARY\n");
+			FILE *cuef = fopen(cuename, "w");
+			char *iso_base = port_basename(isoname);
+			fprintf(cuef, "FILE \"%s\" BINARY\n", iso_base);
+			free(iso_base);
 			uint8_t flag;
 			for (size_t i = 0; i < els_read - 1; i++)
 			{
@@ -159,7 +336,8 @@ int main(int argc, char **argv)
 							fprintf(cuef, "    INDEX 01 %02d:%02d:%02d\n", m, s, f);
 						} else {
 							fprintf(cuef, "    INDEX 01 %02d:%02d:%02d\n", m, s, f);
-							fprintf(cuef, "FILE \"audio.wav\" WAVE\n");
+							char *audio_base = port_basename(audioname);
+							fprintf(cuef, "FILE \"%s\" BINARY\n", audio_base);
 						}
 						break;
 					case 0:
@@ -181,8 +359,8 @@ int main(int argc, char **argv)
 			uint32_t *els = calloc(sizeof(uint32_t), num_els);
 			size_t els_read = fread(els, sizeof(uint32_t), num_els, f);
 			long old_pos = ftell(f);
-			FILE *data_file = fopen("data.bin", "wb");
-			FILE *audio_file = fopen("audio.bin", "wb");
+			FILE *data_file = fopen(isoname, "wb");
+			FILE *audio_file = fopen(audioname, "wb");
 			uint32_t prev;
 			uint32_t data_blocks = 0;
 			for (size_t i = 0, cur_block = 0; i < els_read; i++)

@@ -2,3 +2,10 @@
 mecd_decode
 psb
 m2decrypt
+*.bin.m
+*.bin
+*.cue
+*.iso
+*.wav
+*.cdr
+*.psb
